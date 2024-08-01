@@ -1,0 +1,2 @@
+from .NLayerDiscriminator import NLayerDiscriminator
+from .PixelDiscriminator import PixelDiscriminator
