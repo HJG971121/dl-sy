@@ -1,0 +1,2702 @@
+[12/21 16:11:46] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:11:47] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:11:47] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:11:47] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:11:47] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:11:47] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:11:47] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:11:47] d2.utils.env INFO: Using a generated random seed 47746006
+[12/21 16:11:47] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:11:47] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:11:47] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:11:53] d2.segmentation.evaluation.evaluation_loop INFO: Total inference time: 0:00:00.568434 (0.568434 s / iter per device, on 1 devices)
+[12/21 16:11:53] d2.segmentation.evaluation.evaluation_loop INFO: Total inference pure compute time: 0:00:00 (0.051384 s / iter per device, on 1 devices)
+[12/21 16:11:53] d2.evaluation.testing INFO: copypaste: Task: GnrtMTTEvaluator
+[12/21 16:11:53] d2.evaluation.testing INFO: copypaste: Dice
+[12/21 16:11:53] d2.evaluation.testing INFO: copypaste: 0.8152
+[12/21 16:14:32] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:14:32] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:14:32] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:14:32] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:14:32] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:14:32] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:14:32] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:14:32] d2.utils.env INFO: Using a generated random seed 32576596
+[12/21 16:14:32] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:14:32] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:14:32] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:16:22] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:16:22] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:16:22] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:16:22] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:16:23] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:16:23] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:16:23] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:16:23] d2.utils.env INFO: Using a generated random seed 23083278
+[12/21 16:16:23] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:16:23] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:16:23] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:17:00] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:17:00] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:17:00] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:17:00] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:17:00] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:17:00] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:17:00] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:17:00] d2.utils.env INFO: Using a generated random seed 968201
+[12/21 16:17:01] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:17:01] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:17:01] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:18:02] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:18:02] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:18:02] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:18:02] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:18:02] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:18:02] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:18:02] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:18:02] d2.utils.env INFO: Using a generated random seed 2556132
+[12/21 16:18:02] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:18:02] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:18:02] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:18:47] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:18:47] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:18:47] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:18:47] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:18:47] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:18:47] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:18:47] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:18:47] d2.utils.env INFO: Using a generated random seed 47749932
+[12/21 16:18:47] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:18:47] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:18:47] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:18:52] d2.segmentation.evaluation.evaluation_loop INFO: Total inference time: 0:00:00.502712 (0.502712 s / iter per device, on 1 devices)
+[12/21 16:18:52] d2.segmentation.evaluation.evaluation_loop INFO: Total inference pure compute time: 0:00:00 (0.059996 s / iter per device, on 1 devices)
+[12/21 16:18:52] d2.evaluation.testing INFO: copypaste: Task: GnrtMTTEvaluator
+[12/21 16:18:52] d2.evaluation.testing INFO: copypaste: Dice
+[12/21 16:18:52] d2.evaluation.testing INFO: copypaste: 0.8152
+[12/21 16:19:09] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:19:10] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:19:10] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:19:10] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:19:10] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:19:10] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:19:10] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:19:10] d2.utils.env INFO: Using a generated random seed 10347662
+[12/21 16:19:10] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:19:10] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:19:10] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:19:15] d2.segmentation.evaluation.evaluation_loop INFO: Total inference time: 0:00:00.494563 (0.494563 s / iter per device, on 1 devices)
+[12/21 16:19:15] d2.segmentation.evaluation.evaluation_loop INFO: Total inference pure compute time: 0:00:00 (0.051268 s / iter per device, on 1 devices)
+[12/21 16:19:15] d2.evaluation.testing INFO: copypaste: Task: GnrtMTTEvaluator
+[12/21 16:19:15] d2.evaluation.testing INFO: copypaste: Dice
+[12/21 16:19:15] d2.evaluation.testing INFO: copypaste: 0.8152
+[12/21 16:38:03] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:38:03] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:38:03] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:38:03] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:38:03] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:38:03] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:38:03] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:38:03] d2.utils.env INFO: Using a generated random seed 3898571
+[12/21 16:38:03] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:38:03] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:38:04] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 32 batches
+[12/21 16:38:20] d2.segmentation.evaluation.evaluation_loop INFO: Inference done 11/32. Dataloading: 0.0004 s/iter. Inference: 0.0614 s/iter. Eval: 0.0039 s/iter. Total: 0.0656 s/iter. ETA=0:00:01
+[12/21 16:38:22] d2.segmentation.evaluation.evaluation_loop INFO: Total inference time: 0:00:02.396308 (0.088752 s / iter per device, on 1 devices)
+[12/21 16:38:22] d2.segmentation.evaluation.evaluation_loop INFO: Total inference pure compute time: 0:00:01 (0.066806 s / iter per device, on 1 devices)
+[12/21 16:38:22] d2.evaluation.testing INFO: copypaste: Task: GnrtMTTEvaluator
+[12/21 16:38:22] d2.evaluation.testing INFO: copypaste: Dice
+[12/21 16:38:22] d2.evaluation.testing INFO: copypaste: 0.7928
+[12/21 16:39:13] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:39:13] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:39:13] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:39:13] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:39:13] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:39:13] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:39:13] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:39:13] d2.utils.env INFO: Using a generated random seed 13790690
+[12/21 16:39:13] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:39:13] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:39:13] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 32 batches
+[12/21 16:39:30] d2.segmentation.evaluation.evaluation_loop INFO: Inference done 11/32. Dataloading: 0.0001 s/iter. Inference: 0.0505 s/iter. Eval: 0.0029 s/iter. Total: 0.0536 s/iter. ETA=0:00:01
+[12/21 16:39:32] d2.segmentation.evaluation.evaluation_loop INFO: Total inference time: 0:00:02.176287 (0.080603 s / iter per device, on 1 devices)
+[12/21 16:39:32] d2.segmentation.evaluation.evaluation_loop INFO: Total inference pure compute time: 0:00:01 (0.060235 s / iter per device, on 1 devices)
+[12/21 16:39:32] d2.evaluation.testing INFO: copypaste: Task: GnrtMTTEvaluator
+[12/21 16:39:32] d2.evaluation.testing INFO: copypaste: Dice
+[12/21 16:39:32] d2.evaluation.testing INFO: copypaste: 0.7931
+[12/21 16:40:13] detectron2 INFO: Rank of current process: 0. World size: 1
+[12/21 16:40:14] detectron2 INFO: Environment info:
+-------------------------------  ---------------------------------------------------------------------------------------------
+sys.platform                     win32
+Python                           3.9.16 (main, Mar  8 2023, 10:39:24) [MSC v.1916 64 bit (AMD64)]
+numpy                            1.21.5
+detectron2                       0.6 @E:\dl-sy\detectron2\detectron2
+Compiler                         MSVC 193532217
+CUDA compiler                    CUDA 11.8
+detectron2 arch flags            E:\dl-sy\detectron2\detectron2\_C.cp39-win_amd64.pyd; cannot find cuobjdump
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.0.1+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  False
+GPU available                    Yes
+GPU 0                            NVIDIA GeForce RTX 4070 Ti (arch=8.9)
+Driver version                   531.79
+CUDA_HOME                        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
+Pillow                           9.5.0
+torchvision                      0.15.2+cu118 @C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision
+torchvision arch flags           C:\Users\14579\anaconda3\envs\d2l\lib\site-packages\torchvision\_C.pyd; cannot find cuobjdump
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.7.0
+-------------------------------  ---------------------------------------------------------------------------------------------
+PyTorch built with:
+  - C++ Version: 199711
+  - MSVC 193431937
+  - Intel(R) Math Kernel Library Version 2020.0.2 Product Build 20200624 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v2.7.3 (Git Hash 6dbeffbae1f23cbbeae17adb7b5b13f1f37c080e)
+  - OpenMP 2019
+  - LAPACK is enabled (usually provided by MKL)
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.5.4
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=C:/actions-runner/_work/pytorch/pytorch/builder/windows/tmp_bin/sccache-cl.exe, CXX_FLAGS=/DWIN32 /D_WINDOWS /GR /EHsc /w /bigobj /FS -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_DISABLE_GPU_ASSERTS=OFF, TORCH_VERSION=2.0.1, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=OFF, USE_OPENMP=ON, USE_ROCM=OFF, 
+
+[12/21 16:40:14] detectron2 INFO: Command line arguments: Namespace(config_file='..\\ICGVesSeg\\configs\\baseline.py', resume=False, eval_only=True, num_gpus=1, num_machines=1, machine_rank=0, dist_url='tcp://127.0.0.1:49153', opts=['train.init_checkpoint=E:\\dl-sy\\ICGVesSeg\\results\\baseline_231220\\model_final.pth'])
+[12/21 16:40:14] detectron2 INFO: Contents of args.config_file=..\ICGVesSeg\configs\baseline.py:
+import os
+import time
+from omegaconf import OmegaConf
+
+from detectron2.config import LazyCall as L
+from detectron2.segmentation.data import (BaseDataset,
+                                          build_train_loader,
+                                          build_test_loader)
+from detectron2.segmentation.modeling import UNetBackbone
+from detectron2.segmentation.data.base_dataset import parse_json_annotation_file
+from detectron2.segmentation.transforms import RandomCrop, CenterCrop, FlipTransform, RandomSizeCrop, RotateTransform
+from detectron2.segmentation.transforms.split_combine import SplitCombiner
+
+from ..common.optim import AdamW as optimizer
+from ..common.optim import grad_clippers
+from ..common.schedule import multi_step_scheduler as lr_scheduler
+# from ..common.split_combine import *
+
+from ..data.data_mapper import VesSegDataMapper
+from ..evaluation.evaluator import VesSegEvaluator
+from ..modeling.ves_seg import VesselSeg
+from ..modeling.head import VesSegHead
+from ..common.losses import (LossList, Diceloss)
+
+# ================================================================
+# output_dir
+# ================================================================
+OUTPUT_DIR = 'E:/dl-sy/ICGVesSeg/results'
+
+file_name, _ = os.path.splitext(os.path.basename(__file__))
+creat_time = time.strftime('%y%m%d', time.localtime(time.time()))
+
+output_dir = os.path.join(OUTPUT_DIR, f'{file_name}_{creat_time}')
+os.makedirs(output_dir, exist_ok=True)
+
+# ================================================================
+# 设置 global variable
+# ================================================================
+INIT_CHECKPOINT = ''
+
+ANNO_FILE_TRAIN = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_train.json'
+ANNO_FILE_VALID = 'E:\Generative_MTT\\vessel_segmentation\data\jsons\ICG_vessel_segmentation_valid.json'
+META, DATA_LIST = parse_json_annotation_file(ANNO_FILE_TRAIN)
+TRANSFORM_FIELD = {'image': 'image', 'label': 'segmentation'}
+
+# training params
+BATCH_SIZE_PER_GPU=10
+BATCH_SIZE_PER_GPU_VALID=1
+NUM_WORKERS=10
+GPU_NUM = 1
+DATA_NUM = len(DATA_LIST)
+
+TRAIN_EPOCHS = 100
+TRAIN_REPEAT = 200
+EPOCH_ITERS = (DATA_NUM * TRAIN_REPEAT) // (GPU_NUM * BATCH_SIZE_PER_GPU)
+MAX_ITERS = TRAIN_EPOCHS * EPOCH_ITERS
+AMP_ENABLED = True
+SAVE_EPOCH = 5
+EVAL_EPOCH = 101
+LOG_ITER = 5
+GRAD_CLIPPER = grad_clippers.grad_value_clipper
+
+# dataloader parameters
+CROP_SIZE = [256, 256]
+RESIZE_SIZE = 256
+MARGIN = [8, 8]
+SPLIT_COMBINE_ENABLE = True
+PAD_MODE = 'constant'
+PAD_VALUE = 0
+COMBINE_METHOD = 'avr'
+FLIP_AXIS=[1, 1]
+FLIP_FREQ=60
+ROT_ANGLE=[-10,10]
+ROT_FREQ=50
+
+# optimizer parameters
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 0.001
+LR_VALUES = [0.1, 0.01]
+LR_MILESTONES = [EPOCH_ITERS*51, EPOCH_ITERS*76]
+WARMUP_ITER = 20
+
+# model parameters
+INPUT_CHANNEL = 1
+OUTPUT_CHANNEL = 1
+FEATS = [16, 32, 64, 128, 128]
+BLOCKS = [2, 4, 5, 6, 6]
+
+NORM_PRAMS = [[0], [1]]
+LOSS_FUNCTION = L(LossList)(
+    losses=[Diceloss()],
+    weights=[1]
+)
+
+# ================================================================
+# 设置 dataloader
+# ================================================================
+dataloader = OmegaConf.create()
+
+dataloader.train = L(build_train_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_TRAIN),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            L(RotateTransform)(
+                rot_angle=ROT_ANGLE,
+                rot_freq=ROT_FREQ,
+                fields=TRANSFORM_FIELD
+            ),
+            L(RandomSizeCrop)(
+                crop_size = CROP_SIZE,
+                fields = TRANSFORM_FIELD
+            ),
+            L(FlipTransform)(
+                flip_axis = FLIP_AXIS,
+                flip_freq = FLIP_FREQ,
+                fields = TRANSFORM_FIELD
+            )
+
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.test = L(build_test_loader)(
+    dataset=L(BaseDataset)(anno_file=ANNO_FILE_VALID),
+    mapper=L(VesSegDataMapper)(
+        transforms=[
+            # L(RandomCrop)(
+            #     crop_size = CROP_SIZE,
+            #     fields = TRANSFORM_FIELD
+            # )
+        ],
+    ),
+    batch_size=BATCH_SIZE_PER_GPU_VALID,
+    num_workers=NUM_WORKERS,
+)
+
+dataloader.evaluator = [
+    L(VesSegEvaluator)(
+        output_dir = output_dir,
+    )
+]
+
+# ================================================================
+# 设置 model
+# ================================================================
+model = L(VesselSeg)(
+        backbone = L(UNetBackbone)(
+            input_channel=INPUT_CHANNEL,
+            feats = FEATS,
+            scales = [2, 2, 2, 2, 2],
+            blocks=BLOCKS,
+            slim=True,
+            abn=2,
+        ),
+        head = L(VesSegHead)(
+            loss_function = LOSS_FUNCTION,
+            in_channel = FEATS[0],
+            out_channel = OUTPUT_CHANNEL,
+            is_drop = False
+        ),
+        pixel_mean = NORM_PRAMS[0],
+        pixel_std = NORM_PRAMS[1],
+        resize_size = RESIZE_SIZE,
+        output_dir=output_dir,
+)
+
+
+# ================================================================
+# 设置 optimizer 和 scheduler
+# ================================================================
+optimizer.lr = LEARNING_RATE
+optimizer.weight_decay = WEIGHT_DECAY
+optimizer.eps = 1e-6
+
+# multi step scheduler
+lr_scheduler.values = LR_VALUES
+lr_scheduler.milestones = LR_MILESTONES
+
+# cosine step scheduler
+# lr_scheduler.start = LEARNING_RATE
+# lr_scheduler.end = LEARNING_RATE * 0.001
+
+lr_scheduler.max_iter = MAX_ITERS
+lr_scheduler.warmup_iter = WARMUP_ITER
+
+# ================================================================
+# 设置 train
+# ================================================================
+train=dict(
+    output_dir=output_dir,
+    init_checkpoint=INIT_CHECKPOINT,
+    max_iter=MAX_ITERS,
+    amp=dict(
+        enabled=AMP_ENABLED,
+        grad_clipper=GRAD_CLIPPER,
+    ),
+    ddp=dict(
+        broadcast_buffer=False,
+        find_unused_parameters=False,
+        fp16_compression=False,
+    ),
+    checkpointer=dict(
+        period=EPOCH_ITERS * SAVE_EPOCH,
+        max_to_keep=100,
+    ),
+    split_combine=dict(
+        enabled=SPLIT_COMBINE_ENABLE,
+        split_combiner=L(SplitCombiner)(
+            crop_size=CROP_SIZE,
+            combine_method=COMBINE_METHOD,
+            device='cpu'
+        )
+    ),
+    eval_period=EPOCH_ITERS * EVAL_EPOCH,
+    log_period=LOG_ITER,
+    device='cuda',
+)
+[12/21 16:40:14] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml is human-readable but cannot be loaded.
+[12/21 16:40:14] d2.config.lazy WARNING: Config is saved using cloudpickle at E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml.pkl.
+[12/21 16:40:14] detectron2 INFO: Full config saved to E:/dl-sy/ICGVesSeg/results\baseline_231221\config.yaml
+[12/21 16:40:14] d2.utils.env INFO: Using a generated random seed 14225692
+[12/21 16:40:14] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from E:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:40:14] fvcore.common.checkpoint INFO: [Checkpointer] Loading from e:\dl-sy\ICGVesSeg\results\baseline_231220\model_final.pth ...
+[12/21 16:40:14] d2.segmentation.evaluation.evaluation_loop INFO: Start inference on 5 batches
+[12/21 16:40:19] d2.segmentation.evaluation.evaluation_loop INFO: Total inference time: 0:00:00.525152 (0.525152 s / iter per device, on 1 devices)
+[12/21 16:40:19] d2.segmentation.evaluation.evaluation_loop INFO: Total inference pure compute time: 0:00:00 (0.060515 s / iter per device, on 1 devices)
+[12/21 16:40:19] d2.evaluation.testing INFO: copypaste: Task: GnrtMTTEvaluator
+[12/21 16:40:19] d2.evaluation.testing INFO: copypaste: Dice
+[12/21 16:40:19] d2.evaluation.testing INFO: copypaste: 0.8162
